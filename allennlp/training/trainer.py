@@ -31,6 +31,14 @@ from allennlp.training.trainer_base import TrainerBase
 
 logger = logging.getLogger(__name__)
 
+try:
+    from apex import amp
+    from apex.parallel import DistributedDataParallel as DDP
+
+    _APEX_IMPORTED = True
+except ImportError:
+    _APEX_IMPORTED = False
+
 
 @TrainerBase.register("default", constructor="from_partial_objects")
 class Trainer(TrainerBase):
@@ -66,6 +74,8 @@ class Trainer(TrainerBase):
         local_rank: int = 0,
         world_size: int = 1,
         num_gradient_accumulation_steps: int = 1,
+        use_fp16: bool = False,
+        apex_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
@@ -191,13 +201,26 @@ class Trainer(TrainerBase):
             Gradients are accumulated for the given number of steps before doing an optimizer step. This can
             be useful to accommodate batches that are larger than the RAM size. Refer Thomas Wolf's
             [post](https://tinyurl.com/y5mv44fw) for details on Gradient Accumulation.
+        use_fp16 : ``bool``, optional, (default = False)
+            If set, `Apex` is used to do mixed-precision training.
+        apex_args : ``dict``, optional, (default = None)
+            These are the optional settings specified for Apex before training.
         """
         super().__init__(serialization_dir, cuda_device, distributed, local_rank, world_size)
+
+        if use_fp16 and not _APEX_IMPORTED:
+            raise ConfigurationError(
+                "To use FP16, please make sure you have installed apex from https://www.github.com/nvidia/apex"
+            )
+
+        if use_fp16:
+            model, optimizer = amp.initialize(model, optimizer, **apex_args if apex_args else {})
 
         # I am not calling move_to_gpu here, because if the model is
         # not already on the GPU then the optimizer is going to be wrong.
         self.model = model
 
+        self._use_fp16 = use_fp16
         self.iterator = iterator
         self._validation_iterator = validation_iterator
         self.shuffle = shuffle
@@ -284,13 +307,21 @@ class Trainer(TrainerBase):
         # normal case, reference to `Model` is retained. This reference is only used in
         # these places: `model.__call__`, `model.train` and `model.eval`.
         if self._distributed:
-            self._pytorch_model = DistributedDataParallel(
-                self.model, device_ids=[self.cuda_device], find_unused_parameters=True
-            )
+            if self._use_fp16:
+                self._pytorch_model = DDP(self.model)
+            else:
+                self._pytorch_model = DistributedDataParallel(
+                    self.model, device_ids=[self.cuda_device], find_unused_parameters=True
+                )
         else:
             self._pytorch_model = self.model
 
     def rescale_gradients(self) -> Optional[float]:
+        if self._use_fp16 and self._grad_norm:
+            return training_util.sparse_clip_norm(
+                amp.master_params(self.optimizer), self._grad_norm
+            )
+
         return training_util.rescale_gradients(self.model, self._grad_norm)
 
     def batch_loss(self, batch: TensorDict, for_training: bool) -> torch.Tensor:
@@ -392,7 +423,13 @@ class Trainer(TrainerBase):
                 if torch.isnan(loss):
                     raise ValueError("nan loss encountered")
                 loss = loss / len(batch_group)
-                loss.backward()
+
+                if self._use_fp16:
+                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
                 train_loss += loss.item()
 
             batch_grad_norm = self.rescale_gradients()
@@ -744,6 +781,9 @@ class Trainer(TrainerBase):
         if self._momentum_scheduler is not None:
             training_states["momentum_scheduler"] = self._momentum_scheduler.state_dict()
 
+        if self._use_fp16:
+            training_states["amp"] = amp.state_dict()
+
         self._checkpointer.save_checkpoint(
             model_state=self.model.state_dict(),
             epoch=epoch,
@@ -781,6 +821,10 @@ class Trainer(TrainerBase):
 
         self.model.load_state_dict(model_state)
         self.optimizer.load_state_dict(training_state["optimizer"])
+
+        if self._use_fp16:
+            amp.load_state_dict(training_state["amp"])
+
         if (
             self._learning_rate_scheduler is not None
             and "learning_rate_scheduler" in training_state
@@ -846,6 +890,8 @@ class Trainer(TrainerBase):
         momentum_scheduler: Lazy[MomentumScheduler] = None,
         moving_average: Lazy[MovingAverage] = None,
         checkpointer: Lazy[Checkpointer] = None,
+        use_fp16: bool = False,
+        apex_args: Optional[Dict[str, Any]] = None,
     ) -> "Trainer":
         """
         This method exists so that we can have a documented method to construct this class using
@@ -920,4 +966,6 @@ class Trainer(TrainerBase):
             local_rank=local_rank,
             world_size=world_size,
             num_gradient_accumulation_steps=num_gradient_accumulation_steps,
+            use_fp16=use_fp16,
+            apex_args=apex_args,
         )
