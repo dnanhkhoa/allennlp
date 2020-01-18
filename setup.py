@@ -123,6 +123,8 @@ setup(
         "jsonpickle",
         "semantic_version",
         "dataclasses;python_version<'3.7'",
+        "neptune-client",
+        "psutil",
     ],
     entry_points={"console_scripts": ["allennlp=allennlp.run:run"]},
     setup_requires=setup_requirements,

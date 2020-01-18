@@ -12,16 +12,18 @@ import torch.distributed as dist
 import torch.optim.lr_scheduler
 from torch.nn.parallel import DistributedDataParallel
 
-from allennlp.common import Lazy, Tqdm
+from allennlp.common import Lazy, Params, Tqdm
 from allennlp.common.checks import ConfigurationError, check_for_gpu
 from allennlp.common import util as common_util
 from allennlp.data.instance import Instance
 from allennlp.data.iterators.data_iterator import DataIterator, TensorDict
+from allennlp.models.archival import CONFIG_NAME
 from allennlp.models.model import Model
 from allennlp.nn import util as nn_util
 from allennlp.training import util as training_util
 from allennlp.training.checkpointer import Checkpointer
 from allennlp.training.learning_rate_schedulers import LearningRateScheduler
+from allennlp.training.loggers.neptune import Neptune
 from allennlp.training.metric_tracker import MetricTracker
 from allennlp.training.momentum_schedulers import MomentumScheduler
 from allennlp.training.moving_average import MovingAverage
@@ -74,6 +76,7 @@ class Trainer(TrainerBase):
         local_rank: int = 0,
         world_size: int = 1,
         num_gradient_accumulation_steps: int = 1,
+        neptune_logger: Optional[Neptune] = None,
         use_fp16: bool = False,
         apex_args: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -201,6 +204,8 @@ class Trainer(TrainerBase):
             Gradients are accumulated for the given number of steps before doing an optimizer step. This can
             be useful to accommodate batches that are larger than the RAM size. Refer Thomas Wolf's
             [post](https://tinyurl.com/y5mv44fw) for details on Gradient Accumulation.
+        neptune_logger : ``NeptuneLogger``, optional, (default = None)
+            If provided, training logs will be sent to https://neptune.ai
         use_fp16 : ``bool``, optional, (default = False)
             If set, `Apex` is used to do mixed-precision training.
         apex_args : ``dict``, optional, (default = None)
@@ -298,6 +303,8 @@ class Trainer(TrainerBase):
         # Enable activation logging.
         if histogram_interval is not None:
             self._tensorboard.enable_activation_logging(self.model)
+
+        self._neptune_logger = neptune_logger
 
         # Using `DistributedDataParallel`(ddp) brings in a quirk wrt AllenNLP's `Model` interface and its
         # usage. A `Model` object is wrapped by `ddp`, but assigning the wrapped model to `self.model`
@@ -685,6 +692,9 @@ class Trainer(TrainerBase):
                         break
 
             if self._master:
+                self._neptune_logger.log_metrics(
+                    train_metrics, val_metrics=val_metrics, epoch=epoch
+                )
                 self._tensorboard.log_metrics(
                     train_metrics, val_metrics=val_metrics, log_to_console=True, epoch=epoch + 1
                 )  # +1 because tensorboard doesn't like 0
@@ -744,6 +754,9 @@ class Trainer(TrainerBase):
 
         # make sure pending events are flushed to disk and files are closed properly
         self._tensorboard.close()
+
+        if self._master:
+            self._neptune_logger.finalize()
 
         # Load the best model state before returning
         best_model_state = self._checkpointer.best_model_state()
@@ -890,6 +903,8 @@ class Trainer(TrainerBase):
         momentum_scheduler: Lazy[MomentumScheduler] = None,
         moving_average: Lazy[MovingAverage] = None,
         checkpointer: Lazy[Checkpointer] = None,
+        neptune_project_name: Optional[str] = None,
+        neptune_experiment_name: Optional[str] = None,
         use_fp16: bool = False,
         apex_args: Optional[Dict[str, Any]] = None,
     ) -> "Trainer":
@@ -937,6 +952,20 @@ class Trainer(TrainerBase):
         momentum_scheduler_ = momentum_scheduler.construct(optimizer=optimizer_)
 
         checkpointer_ = checkpointer.construct() or Checkpointer(serialization_dir)
+
+        neptune_logger = None
+        if neptune_project_name:
+            config_file = os.path.join(serialization_dir, CONFIG_NAME)
+
+            config = Params.from_file(config_file)
+
+            neptune_logger = Neptune(
+                project_name=neptune_project_name,
+                experiment_name=neptune_experiment_name,
+                params=config.params,
+                upload_source_files=[config_file],
+            )
+
         return cls(
             model,
             optimizer_,
@@ -966,6 +995,7 @@ class Trainer(TrainerBase):
             local_rank=local_rank,
             world_size=world_size,
             num_gradient_accumulation_steps=num_gradient_accumulation_steps,
+            neptune_logger=neptune_logger,
             use_fp16=use_fp16,
             apex_args=apex_args,
         )
