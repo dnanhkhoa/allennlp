@@ -28,8 +28,11 @@ The available activation functions are
 """
 
 import torch
+import torch.nn.functional as F
 
 from allennlp.common import Registrable
+
+from transformers.modeling_bert import gelu, gelu_new
 
 
 class Activation(Registrable):
@@ -58,8 +61,10 @@ class Activation(Registrable):
 # Activation.by_name('relu')()
 Registrable._registry[Activation] = {
     "linear": (lambda: lambda x: x, None),  # type: ignore
-    "mish": (lambda: lambda x: x * torch.tanh(torch.nn.functional.softplus(x)), None),  # type: ignore
+    "mish": (lambda: lambda x: x * torch.tanh(F.softplus(x)), None),  # type: ignore
     "swish": (lambda: lambda x: x * torch.sigmoid(x), None),  # type: ignore
+    "gelu": (lambda: lambda x: gelu_new(x), None),  # type: ignore
+    "smoother_gelu": (lambda: lambda x: gelu(x), None),  # type: ignore
     "relu": (torch.nn.ReLU, None),
     "relu6": (torch.nn.ReLU6, None),
     "elu": (torch.nn.ELU, None),
