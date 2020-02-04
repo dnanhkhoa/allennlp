@@ -125,6 +125,7 @@ setup(
         "dataclasses;python_version<'3.7'",
         "neptune-client",
         "psutil",
+        "radam @ git+https://github.com/LiyuanLucasLiu/RAdam.git",
     ],
     entry_points={"console_scripts": ["allennlp=allennlp.run:run"]},
     setup_requires=setup_requirements,

@@ -11,6 +11,7 @@ The available optimizers are
 * `"adamw" <https://pytorch.org/docs/master/optim.html#torch.optim.AdamW>`_
 * `"huggingface_adamw"
   <https://huggingface.co/transformers/main_classes/optimizer_schedules.html#transformers.AdamW>`_
+* `"radam" <https://github.com/LiyuanLucasLiu/RAdam>`_
 * `"sparse_adam" <https://pytorch.org/docs/master/optim.html#torch.optim.SparseAdam>`_
 * `"sgd" <https://pytorch.org/docs/master/optim.html#torch.optim.SGD>`_
 * `"rmsprop <https://pytorch.org/docs/master/optim.html#torch.optim.RMSprop>`_
@@ -23,6 +24,7 @@ import re
 import math
 from typing import Any, Dict, List, Tuple, Union
 
+import radam
 import torch
 import transformers
 
@@ -253,6 +255,28 @@ class HuggingfaceAdamWOptimizer(Optimizer, transformers.AdamW):
             eps=eps,
             weight_decay=weight_decay,
             correct_bias=correct_bias,
+        )
+
+
+@Optimizer.register("radam")
+class RAdamOptimizer(Optimizer, radam.RAdam):
+    def __init__(
+        self,
+        model_parameters: List[Tuple[str, torch.nn.Parameter]],
+        parameter_groups: List[Tuple[List[str], Dict[str, Any]]] = None,
+        lr: float = 1e-03,
+        betas: Tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-08,
+        weight_decay: float = 0.0,
+        degenerated_to_sgd: bool = True,
+    ):
+        super().__init__(
+            params=make_parameter_groups(model_parameters, parameter_groups),
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            degenerated_to_sgd=degenerated_to_sgd,
         )
 
 
