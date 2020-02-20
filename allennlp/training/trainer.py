@@ -692,9 +692,11 @@ class Trainer(TrainerBase):
                         break
 
             if self._master:
-                self._neptune_logger.log_metrics(
-                    train_metrics, val_metrics=val_metrics, epoch=epoch
-                )
+                if self._neptune_logger:
+                    self._neptune_logger.log_metrics(
+                        train_metrics, val_metrics=val_metrics, epoch=epoch
+                    )
+
                 self._tensorboard.log_metrics(
                     train_metrics, val_metrics=val_metrics, log_to_console=True, epoch=epoch + 1
                 )  # +1 because tensorboard doesn't like 0
@@ -755,7 +757,7 @@ class Trainer(TrainerBase):
         # make sure pending events are flushed to disk and files are closed properly
         self._tensorboard.close()
 
-        if self._master:
+        if self._master and self._neptune_logger:
             self._neptune_logger.finalize()
 
         # Load the best model state before returning
